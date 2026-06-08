@@ -277,13 +277,15 @@ Xilinx::Xilinx(Jtag *jtag, const std::string &filename,
 	const std::string &spiOverJtagPath,
 	const std::string &target_flash,
 	bool verify, int8_t verbose,
-	bool skip_load_bridge, bool skip_reset, bool read_dna, bool read_xadc):
+	bool skip_load_bridge, bool skip_reset, bool read_dna, bool read_xadc,
+	uint32_t jprogram_idle, int bridge_retries):
 	Device(jtag, filename, file_type, verify, verbose),
 	FlashInterface(filename, verbose, 256, verify, skip_load_bridge,
 				 skip_reset),
 	_device_package(device_package), _spiOverJtagPath(spiOverJtagPath),
 	_irlen(6), _secondary_filename(secondary_filename), _soj_is_v2(false),
-	_jtag_chain_len(1), _is_bpi_board(!spi_flash_type)
+	_jtag_chain_len(1), _is_bpi_board(!spi_flash_type),
+	_jprogram_idle(jprogram_idle), _bridge_retries(bridge_retries)
 {
 	if (prg_type == Device::RD_FLASH) {
 		_mode = Device::READ_MODE;
@@ -693,20 +695,44 @@ bool Xilinx::prepare_flash_access()
 	bool ret = false;
 	if (_skip_load_bridge) {
 		printInfo("Skip loading bridge for spiOverjtag");
-		ret = true;
-	} else {
+		_jtag_chain_len = _jtag->get_chain_len();
+		return true;
+	}
+
+	/* On a Master-SPI board the bridge load races the FPGA's auto-boot from
+	 * flash and can lose intermittently -- load_bridge() still succeeds (config
+	 * completes) but it is the *app* that ends up running, so the bridge does
+	 * not answer on USER4 and the reported SOJ version falls back to 1.0.
+	 * Retrying (--bridge-retries) re-runs JPROGRAM and gives the bridge another
+	 * shot at the race.  Pair with a small --xilinx-jprogram-idle to bias the
+	 * race toward the bridge.  NOTE: a "win" is detected as SOJ version == 2.0,
+	 * so >1 retry is only meaningful with a v2 spiOverJtag bridge.
+	 */
+	int max_attempts = (_bridge_retries < 1) ? 1 : _bridge_retries;
+
+	for (int attempt = 1; attempt <= max_attempts; attempt++) {
 		ret = load_bridge();
-	}
 
-	/* Get number of FPGAs in the Jtag Chain */
-	_jtag_chain_len = _jtag->get_chain_len();
+		/* Get number of FPGAs in the Jtag Chain */
+		_jtag_chain_len = _jtag->get_chain_len();
 
-	/* check SpiOverJtag version */
-	if (ret) {
-		if (get_spiOverJtag_version() == 2.0f)
+		if (!ret)
+			continue;
+
+		/* check SpiOverJtag version: a live bridge answers on USER4 */
+		if (get_spiOverJtag_version() == 2.0f) {
 			_soj_is_v2 = true;
-		printf("SOJ version: %f\n", _soj_is_v2 ? 2.0f : 1.0f);
+			printf("SOJ version: %f\n", 2.0f);
+			return true;
+		}
+
+		if (max_attempts > 1)
+			printf("SOJ version: 1.0 (bridge load attempt %d/%d lost the boot race)\n",
+				attempt, max_attempts);
 	}
+
+	/* single legacy attempt, or all retries exhausted */
+	printf("SOJ version: %f\n", _soj_is_v2 ? 2.0f : 1.0f);
 	return ret;
 }
 
@@ -885,7 +911,14 @@ void Xilinx::program_mem(ConfigBitstreamParser *bitfile)
 	 * 8: Move into the RTI state.                        X     0   10,000(1)
 	 */
 	_jtag->set_state(Jtag::RUN_TEST_IDLE);
-	_jtag->toggleClk(10000*12);
+	/* On a Master-SPI board the FPGA begins booting from flash as soon as the
+	 * config memory is cleared (INIT_B high).  The default ~120,000 idle cycles
+	 * here give that SPI boot a head start, so by the time CFG_IN is issued the
+	 * app has already reached DONE and the JTAG bridge load loses.  Reducing the
+	 * idle (--xilinx-jprogram-idle) lets CFG_IN take over before the master boot
+	 * completes; pair it with --bridge-retries since the race is marginal.
+	 */
+	_jtag->toggleClk(_jprogram_idle);
 	/*
 	 * 9: Start loading the CFG_IN instruction,
 	 *    LSB first:                                    00101   0   5

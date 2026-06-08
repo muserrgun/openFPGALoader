@@ -128,6 +128,8 @@ struct arguments {
 	bool read_xadc;
 	std::string read_register;
 	std::string user_flash;
+	int jprogram_idle;
+	int bridge_retries;
 };
 
 int run_xvc_server(const struct arguments &args, const cable_t &cable,
@@ -168,7 +170,8 @@ int main(int argc, char **argv)
 			false, 3721, "-",
 			"", false, {},  // mcufw conmcu, user_misc_dev_list
 			false, false, "", // read_dna, read_xadc, read_register
-			"" // user_flash
+			"", // user_flash
+			120000, 1 // jprogram_idle, bridge_retries
 	};
 	/* parse arguments */
 	int ret = parse_opt(argc, argv, &args, &pins_config);
@@ -511,7 +514,8 @@ int main(int argc, char **argv)
 			fpga = new Xilinx(jtag, args.bit_file, args.secondary_bit_file,
 				args.file_type, args.prg_type, args.fpga_part, args.spi_flash_type, args.bridge_path,
 				args.target_flash, args.verify, args.verbose, args.skip_load_bridge, args.skip_reset,
-				args.read_dna, args.read_xadc);
+				args.read_dna, args.read_xadc,
+				static_cast<uint32_t>(args.jprogram_idle), args.bridge_retries);
 #else
 			printError("Support for Xilinx FPGAs was not enabled at compile time");
 			delete(jtag);
@@ -569,7 +573,7 @@ int main(int argc, char **argv)
 			fpga = new CologneChip(jtag, args.bit_file, args.file_type,
 				args.prg_type, args.board, args.cable, args.verify, args.verbose);
 #else
-			printError("Support for Cologne Chip FPGAs was not enabled at compile time");
+			printError("Support for Gowin FPGAs was not enabled at compile time");
 			delete(jtag);
 			return EXIT_FAILURE;
 #endif
@@ -756,7 +760,7 @@ int spi_comm(struct arguments args, const cable_t &cable,
 				board->reset_pin, board->done_pin, DBUS6, board->oe_pin,
 				args.verify, args.verbose);
 #else
-			printError("Support for Cologne Chip FPGAs was not enabled at compile time");
+			printError("Support for Gowin FPGAs was not enabled at compile time");
 			return EXIT_FAILURE;
 #endif
 		} else {
@@ -1031,6 +1035,15 @@ int parse_opt(int argc, char **argv, struct arguments *args,
 				cxxopts::value<std::string>(args->read_register))
 			("user-flash", "User flash file (Gowin LittleBee FPGA only)",
 				cxxopts::value<std::string>(args->user_flash))
+			("xilinx-jprogram-idle",
+				"Xilinx: TCK idle cycles between JPROGRAM and CFG_IN when loading a "
+				"bitstream/bridge over JTAG. A small value lets the JTAG load win the "
+				"boot race against a Master-SPI auto-boot",
+				cxxopts::value<int>(args->jprogram_idle)->default_value("120000"))
+			("bridge-retries",
+				"Xilinx: retry loading the spiOverJtag bridge up to N times until it "
+				"responds (helps reflash a booting Master-SPI board)",
+				cxxopts::value<int>(args->bridge_retries)->default_value("1"))
 			("V,version", "Print program version")
 			("Version", "Print program version (Deprecated)");
 

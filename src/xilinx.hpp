@@ -30,7 +30,8 @@ class Xilinx: public Device, FlashInterface {
 				const std::string &target_flash,
 				bool verify, int8_t verbose,
 				bool skip_load_bridge, bool skip_reset,
-				bool read_dna, bool read_xadc);
+				bool read_dna, bool read_xadc,
+				uint32_t jprogram_idle = 120000, int bridge_retries = 1);
 		~Xilinx();
 
 		void program(unsigned int offset, bool unprotect_flash) override;
@@ -279,6 +280,8 @@ class Xilinx: public Device, FlashInterface {
 		uint32_t _jtag_chain_len; /* Jtag Chain Length */
 		bool _is_bpi_board; /* true if board uses BPI parallel flash */
 		std::unique_ptr<BPIFlash> _bpi_flash; /* BPI flash instance */
+		uint32_t _jprogram_idle; /* TCK idle cycles between JPROGRAM and CFG_IN (--xilinx-jprogram-idle) */
+		int _bridge_retries; /* spiOverJtag bridge load attempts (--bridge-retries) */
 };
 
 #endif  // SRC_XILINX_HPP_
